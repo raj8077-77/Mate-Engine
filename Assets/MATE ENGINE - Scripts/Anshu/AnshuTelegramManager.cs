@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEngine;
@@ -7,78 +8,139 @@ using UnityEngine.Networking;
 
 /// <summary>
 /// Anshu Telegram Controller
-/// - Magic Spell (hashed) to start 20-min session
-/// - Receives text / voice / images
-/// - Forwards to Google AI Brain and local models
+/// - Settings se Bot Token aur Magic Spell set/reset kar sakte ho
+/// - Magic Spell hashed save hota hai
+/// - Reset ke liye current password chahiye
 /// </summary>
 public class AnshuTelegramManager : MonoBehaviour
 {
     [Header("Telegram")]
-    public string botToken = "YOUR_BOT_TOKEN_HERE";
-    public long allowedChatId = 0; // Set after first message or hardcode
+    public string botToken = "";
+    public long allowedChatId = 0;
 
     [Header("Magic Spell")]
-    [Tooltip("SHA-256 hash of the Magic Spell (never store plain text)")]
-    public string magicSpellHash = "PASTE_SHA256_HASH_HERE";
+    public string magicSpellHash = "";
 
     [Header("Session")]
     public float sessionDurationMinutes = 20f;
     private float sessionEndTime = 0f;
-    private bool sessionActive = false;
+    public bool sessionActive = false;
 
     private string lastUpdateId = "0";
     private bool isPolling = false;
 
+    private string configPath;
+
+    [Serializable]
+    class AnshuConfig
+    {
+        public string botToken;
+        public string magicSpellHash;
+        public long allowedChatId;
+    }
+
+    void Awake()
+    {
+        configPath = Path.Combine(Application.persistentDataPath, "anshu_config.json");
+        LoadConfig();
+    }
+
     void Start()
     {
-        Debug.Log("[Anshu] Telegram Manager started. Waiting for Magic Spell...");
-        StartCoroutine(PollTelegram());
+        Debug.Log("[Anshu] Telegram Manager ready.");
+        if (!string.IsNullOrEmpty(botToken))
+            StartCoroutine(PollTelegram());
+    }
+
+    public void SaveConfig()
+    {
+        var cfg = new AnshuConfig
+        {
+            botToken = botToken,
+            magicSpellHash = magicSpellHash,
+            allowedChatId = allowedChatId
+        };
+        File.WriteAllText(configPath, JsonUtility.ToJson(cfg, true));
+        Debug.Log("[Anshu] Config saved.");
+    }
+
+    void LoadConfig()
+    {
+        if (!File.Exists(configPath)) return;
+        try
+        {
+            var cfg = JsonUtility.FromJson<AnshuConfig>(File.ReadAllText(configPath));
+            botToken = cfg.botToken;
+            magicSpellHash = cfg.magicSpellHash;
+            allowedChatId = cfg.allowedChatId;
+            Debug.Log("[Anshu] Config loaded.");
+        }
+        catch { }
+    }
+
+    // Settings se call karna: Set new Magic Spell (hash bana ke)
+    public void SetMagicSpell(string plainSpell)
+    {
+        magicSpellHash = ComputeSha256(plainSpell);
+        SaveConfig();
+        Debug.Log("[Anshu] Magic Spell updated.");
+    }
+
+    // Reset ke liye current password verify karo
+    public bool VerifyAndResetSpell(string currentPlain, string newPlain)
+    {
+        if (ComputeSha256(currentPlain) != magicSpellHash)
+        {
+            Debug.Log("[Anshu] Wrong current password.");
+            return false;
+        }
+        SetMagicSpell(newPlain);
+        return true;
+    }
+
+    public void SetBotToken(string token)
+    {
+        botToken = token;
+        SaveConfig();
+        if (!isPolling && !string.IsNullOrEmpty(botToken))
+            StartCoroutine(PollTelegram());
     }
 
     IEnumerator PollTelegram()
     {
         isPolling = true;
-        while (isPolling)
+        while (isPolling && !string.IsNullOrEmpty(botToken))
         {
-            string url = $"https://api.telegram.org/bot{botToken}/getUpdates?offset={lastUpdateId}&timeout=20";
+            string url = $"https://api.telegram.org/bot{botToken}/getUpdates?offset={lastUpdateId}&timeout=15";
             using (UnityWebRequest www = UnityWebRequest.Get(url))
             {
                 yield return www.SendWebRequest();
                 if (www.result == UnityWebRequest.Result.Success)
-                {
                     ProcessUpdates(www.downloadHandler.text);
-                }
             }
-            yield return new WaitForSeconds(1f);
+            yield return new WaitForSeconds(0.5f);
         }
+        isPolling = false;
     }
 
     void ProcessUpdates(string json)
     {
-        // TODO: Parse JSON properly (use Newtonsoft.Json or simple string check for prototype)
-        // For now, basic detection of Magic Spell
-        if (json.Contains("message") && !sessionActive)
-        {
-            // Check if message matches Magic Spell hash
-            // Implement proper JSON parsing here
-            Debug.Log("[Anshu] New message received. Checking Magic Spell...");
-        }
-
+        // Basic prototype — proper JSON parsing baad mein add karenge
         if (sessionActive && Time.time > sessionEndTime)
         {
             sessionActive = false;
-            Debug.Log("[Anshu] Session expired. Magic Spell required again.");
+            Debug.Log("[Anshu] Session expired.");
         }
     }
 
     public bool CheckMagicSpell(string input)
     {
-        string hash = ComputeSha256(input);
-        if (hash == magicSpellHash)
+        if (string.IsNullOrEmpty(magicSpellHash)) return false;
+        if (ComputeSha256(input) == magicSpellHash)
         {
             sessionActive = true;
             sessionEndTime = Time.time + (sessionDurationMinutes * 60f);
-            Debug.Log("[Anshu] Magic Spell accepted. Session started for 20 minutes.");
+            Debug.Log("[Anshu] Session started.");
             return true;
         }
         return false;
@@ -98,7 +160,7 @@ public class AnshuTelegramManager : MonoBehaviour
 
     public void SendTelegramMessage(string text)
     {
-        if (!sessionActive) return;
+        if (!sessionActive || string.IsNullOrEmpty(botToken)) return;
         StartCoroutine(SendMessageCoroutine(text));
     }
 
@@ -106,13 +168,8 @@ public class AnshuTelegramManager : MonoBehaviour
     {
         string url = $"https://api.telegram.org/bot{botToken}/sendMessage?chat_id={allowedChatId}&text={UnityWebRequest.EscapeURL(text)}";
         using (UnityWebRequest www = UnityWebRequest.Get(url))
-        {
             yield return www.SendWebRequest();
-        }
     }
 
-    void OnDestroy()
-    {
-        isPolling = false;
-    }
+    void OnDestroy() => isPolling = false;
 }
